@@ -145,7 +145,7 @@ impl<T: Read + Write> Xmodem<T> {
 
                 (self.progress)(Progress::Packet(self.packet));
 
-                self.packet.wrapping_add(1);
+                self.packet = self.packet.wrapping_add(1);
 
                 Ok(128)
             }
@@ -159,8 +159,65 @@ impl<T: Read + Write> Xmodem<T> {
         }
     }
 
-    pub fn write_packet(&mut self, buf: &mut [u8]) -> Result<usize> {
-        unimplemented!()
+    pub fn write_packet(&mut self, buf: &[u8]) -> Result<usize> {
+        if buf.len() != 0 && buf.len() < 128 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpectedeof",
+            ));
+        }
+
+        if !self.started {
+            // wait for reciver to send NAK
+            (self.progress)(Progress::Waiting);
+            self.expect_byte(NAK, "expected NAK from receiver")?;
+            (self.progress)(Progress::Started);
+            self.started = true;
+        }
+
+        if buf.len() == 0 {
+            // no more data. end the transmit
+            self.write_byte(EOT)?;
+            self.expect_byte_or_cancel(NAK, "expected NAK for EOT")?;
+            self.write_byte(EOT)?;
+            self.expect_byte_or_cancel(ACK, "expected 2nd NAK for EOT")?;
+            return Ok(0);
+        }
+
+        // SOH to start begining of the packet
+        self.write_byte(SOH)?;
+
+        // packet number
+        self.write_byte(self.packet)?;
+
+        // 1's complement of packet number
+        self.write_byte(!self.packet)?;
+
+        // actual payload
+        let n = self.inner.write(&buf[..])?;
+
+        if n < 128 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "unexpectedeof",
+            ));
+        }
+
+        let mut csum = 0u8;
+        for i in 0..128 {
+            csum = csum.wrapping_add(buf[i]);
+        }
+
+        // send checksum
+        self.write_byte(csum)?;
+
+        (self.progress)(Progress::Packet(self.packet));
+
+        self.packet = self.packet.wrapping_add(1);
+
+        self.flush()?;
+
+        Ok(n)
     }
 
     fn flush(&mut self) -> io::Result<()> {
