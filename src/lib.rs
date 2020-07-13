@@ -20,20 +20,86 @@ struct Xmodem<T> {
 }
 
 impl Xmodem<()> {
-    pub fn transmit<R: Read>(r: R) -> Self {
-        unimplemented!()
+    pub fn transmit<R, W>(from: R, to: W) -> io::Result<usize>
+    where
+        W: Read + Write,
+        R: Read,
+    {
+        Self::transmit_with_progress(from, to, progress::noop)
     }
 
-    pub fn transmit_with_progress<R: Read>(r: R, progress: ProgressFn) -> Self {
-        unimplemented!()
+    pub fn transmit_with_progress<R, W>(
+        mut from: R,
+        to: W,
+        progress: ProgressFn,
+    ) -> io::Result<usize>
+    where
+        W: Read + Write,
+        R: Read,
+    {
+        let mut packet = [0u8; 128];
+        let mut written = 0;
+
+        let mut transmitter = Xmodem::new_with_progress(to, progress);
+
+        // till no more data is available
+        loop {
+            // read packet from srouce.
+            let n = from.read(&mut packet)?;
+
+            // use xmode to transform single packet
+
+            if n == 0 {
+                // no more data
+                transmitter.write_packet(&[])?;
+                break;
+            }
+
+            written += transmitter.write_packet(&packet)?;
+        }
+
+        Ok(written)
     }
 
-    pub fn receive<W: Write>(w: W) -> Self {
-        unimplemented!()
+    pub fn receive<R, W>(from: R, to: W) -> io::Result<usize>
+    where
+        W: Write,
+        R: Read + Write,
+    {
+        Self::receive_with_progress(from, to, progress::noop)
     }
 
-    pub fn receive_with_progress<W: Write>(w: W, progress: ProgressFn) -> Self {
-        unimplemented!()
+    pub fn receive_with_progress<R, W>(
+        from: R,
+        mut to: W,
+        progress: ProgressFn,
+    ) -> io::Result<usize>
+    where
+        W: Write,
+        R: Read + Write,
+    {
+        let mut packet = [0u8; 128];
+        let mut recieved = 0;
+
+        let mut receiver = Xmodem::new_with_progress(from, progress);
+
+        // till no more data is available
+        loop {
+            // read packet from receiver
+            let n = receiver.read_packet(&mut packet)?;
+
+            // use xmode to transform single packet
+
+            if n == 0 {
+                // no more data
+                to.write(&[])?;
+                break;
+            }
+
+            recieved += to.write(&packet)?;
+        }
+
+        Ok(recieved)
     }
 }
 
@@ -75,7 +141,10 @@ impl<T: Read + Write> Xmodem<T> {
 
         match b {
             CAN => Err(io::Error::new(io::ErrorKind::ConnectionAborted, msg)),
-            _ => Err(io::Error::new(io::ErrorKind::InvalidData, msg)),
+            _ => {
+                println!("got: {}", b);
+                Err(io::Error::new(io::ErrorKind::InvalidData, msg))
+            }
         }
     }
 
@@ -112,8 +181,9 @@ impl<T: Read + Write> Xmodem<T> {
             EOT => {
                 // end of the transmission
                 self.write_byte(NAK)?;
-                self.expect_byte_or_cancel(EOT, "expected second EOT")?;
+                self.expect_byte(EOT, "expected second EOT")?;
                 self.write_byte(ACK)?;
+                self.started = false;
                 Ok(0)
             }
             SOH => {
@@ -178,9 +248,10 @@ impl<T: Read + Write> Xmodem<T> {
         if buf.len() == 0 {
             // no more data. end the transmit
             self.write_byte(EOT)?;
-            self.expect_byte_or_cancel(NAK, "expected NAK for EOT")?;
+            self.expect_byte(NAK, "expected NAK for EOT")?;
             self.write_byte(EOT)?;
-            self.expect_byte_or_cancel(ACK, "expected 2nd NAK for EOT")?;
+            self.expect_byte(ACK, "expected 2nd NAK for EOT")?;
+            self.started = false;
             return Ok(0);
         }
 
@@ -211,13 +282,20 @@ impl<T: Read + Write> Xmodem<T> {
         // send checksum
         self.write_byte(csum)?;
 
-        (self.progress)(Progress::Packet(self.packet));
+        let b = self.read_byte()?;
+        match b {
+            NAK => Err(io::Error::new(io::ErrorKind::Interrupted, "expected")),
+            ACK => {
+                (self.progress)(Progress::Packet(self.packet));
 
-        self.packet = self.packet.wrapping_add(1);
+                self.packet = self.packet.wrapping_add(1);
 
-        self.flush()?;
+                self.flush()?;
 
-        Ok(n)
+                Ok(n)
+            }
+            _ => Err(io::Error::new(io::ErrorKind::InvalidData, "expected")),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
