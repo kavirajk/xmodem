@@ -43,7 +43,7 @@ impl Xmodem<()> {
         let mut transmitter = Xmodem::new_with_progress(to, progress);
 
         // till no more data is available
-        loop {
+        'next_packet: loop {
             // read packet from srouce.
             let n = from.read(&mut packet)?;
 
@@ -52,13 +52,21 @@ impl Xmodem<()> {
             if n == 0 {
                 // no more data
                 transmitter.write_packet(&[])?;
-                break;
+                return Ok(written);
             }
 
-            written += transmitter.write_packet(&packet)?;
+            for _ in 0..10 {
+                match transmitter.write_packet(&packet) {
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Ok(_) => {
+                        written += n;
+                        continue 'next_packet;
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "bad transmit"));
         }
-
-        Ok(written)
     }
 
     pub fn receive<R, W>(from: R, to: W) -> io::Result<usize>
@@ -79,27 +87,28 @@ impl Xmodem<()> {
         R: Read + Write,
     {
         let mut packet = [0u8; 128];
-        let mut recieved = 0;
+        let mut received = 0;
 
         let mut receiver = Xmodem::new_with_progress(from, progress);
 
-        // till no more data is available
-        loop {
-            // read packet from receiver
-            let n = receiver.read_packet(&mut packet)?;
-
-            // use xmode to transform single packet
-
-            if n == 0 {
-                // no more data
-                to.write(&[])?;
-                break;
+        'next_packet: loop {
+            for _ in 0..10 {
+                match receiver.read_packet(&mut packet) {
+                    Err(ref e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e),
+                    Ok(0) => break 'next_packet,
+                    Ok(n) => {
+                        received += n;
+                        to.write_all(&packet)?;
+                        continue 'next_packet;
+                    }
+                }
             }
 
-            recieved += to.write(&packet)?;
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "bad receive"));
         }
 
-        Ok(recieved)
+        Ok(received)
     }
 }
 
